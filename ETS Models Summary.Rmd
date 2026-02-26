@@ -1,0 +1,210 @@
+---
+title: "Final Project"
+author: "Wed 2/11 1"
+---
+
+## Read  File and Graph
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(zoo)
+
+# Read File
+path <- "Illinois Suicide Deaths 1999-2026.xlsx"
+df <- read_excel(path)
+
+# Clean column "date"
+df <- df %>%
+  mutate(
+    date_clean = str_extract(date, "^\\d{4}/\\d{2}"),  
+    ym = as.yearmon(date_clean, format = "%Y/%m")
+  ) %>%
+  arrange(ym)
+
+# Convert to Time Series
+start_year  <- as.numeric(format(as.Date(df$ym), "%Y"))[1]
+start_month <- as.numeric(format(as.Date(df$ym), "%m"))[1]
+
+y_full_ts <- ts(df$deaths,
+           start = c(start_year, start_month),
+           frequency = 12)
+
+# Plot
+print(y_full_ts)
+plot(y_full_ts,
+     main = "Illinois Suicide Deaths (Monthly, incl. provisional)",
+     ylab = "Deaths",
+     xlab = "Year")
+```
+
+## Cut the Time Series to just consider until December 2023
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# Consider until December 2023
+y_until_2023_ts <- window(y_full_ts, end = c(2023, 12))
+
+# Plot
+print(y_until_2023_ts)
+plot(y_until_2023_ts,
+     main = "Illinois Suicide Deaths (Monthly - Full Confirmed)",
+     ylab = "Deaths",
+     xlab = "Year")
+```
+
+The time series plot shows a clear upward movement over time and strong monthly seasonality. The seasonal pattern appears relatively stable across years, although some amplification may occur at higher levels. These characteristics motivate the use of exponential smoothing models that account for both trend and seasonality.
+
+The seasonal amplitude appears approximately constant, suggesting additive seasonality may be appropriate; however, multiplicative structures are also considered for robustness.
+
+## ADF Test
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+library(tseries)
+
+# ADF test on the series
+adf_orig <- adf.test(y_until_2023_ts)
+adf_orig
+```
+
+Although the ADF test rejects the null hypothesis of a unit root, indicating the absence of stochastic non-stationarity, the time series clearly displays deterministic trend and strong seasonality. Therefore, the series is not stationary in mean and must be transformed or modeled to account for these structured components.
+
+## ETS Models
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+library(ggplot2)
+library(forecast)
+
+h <- 12
+
+# Provisional Values from January 2024 onward
+actual_2024plus <- window(y_full_ts, start = c(2024, 1), end = c(2024, 12))
+
+# (a) HW: Linear trend + additive seasonality
+fit_add <- hw(y_until_2023_ts, seasonal = "additive", h = h)
+p1 <- autoplot(fit_add) +
+  autolayer(actual_2024plus, series = "Actual (2024+)", linetype = "solid") +
+  ggtitle("HW: Linear Trend + Additive Seasonality") +
+  xlab("Year") + ylab("Deaths")
+print(p1)
+
+# (b) HW: Linear trend + multiplicative seasonality
+fit_mul <- hw(y_until_2023_ts, seasonal = "multiplicative", h = h)
+p2 <- autoplot(fit_mul) +
+  autolayer(actual_2024plus, series = "Actual (2024+)", linetype = "solid") +
+  ggtitle("HW: Linear Trend + Multiplicative Seasonality") +
+  xlab("Year") + ylab("Deaths")
+print(p2)
+
+# (c) HW: Linear trend + multiplicative seasonality + damping
+fit_mul_damped <- hw(y_until_2023_ts, seasonal = "multiplicative", damped = TRUE, h = h)
+p3 <- autoplot(fit_mul_damped) +
+  autolayer(actual_2024plus, series = "Actual (2024+)", linetype = "solid") +
+  ggtitle("HW: Linear Trend + Multiplicative Seasonality (Damped)") +
+  xlab("Year") + ylab("Deaths")
+print(p3)
+
+# (d) Auto ETS (plot forecast, not components)
+fit_auto <- ets(y_until_2023_ts)
+fc_auto  <- forecast(fit_auto, h = h)
+
+p4 <- autoplot(fc_auto) +
+  autolayer(actual_2024plus, series = "Actual (2024+)", linetype = "solid") +
+  ggtitle(paste("Automatic ETS:", fit_auto$method)) +
+  xlab("Year") + ylab("Deaths")
+print(p4)
+```
+
+The automatic procedure selects an ETS(A,N,A) specification, indicating additive errors and additive seasonality without an explicit trend component. Although the original plot suggests an upward movement, the model finds that the evolving level component sufficiently captures this gradual increase without requiring a separate trend parameter. This suggests that the long-term movement may be adequately modeled through smoothing of the level rather than deterministic trend extrapolation.
+
+## RMSE
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# Collect fitted models that worked
+models <- list(
+  HW_add = fit_add,
+  HW_mul = fit_mul,
+  HW_mul_damped = fit_mul_damped,
+  Auto_ETS = fit_auto
+)
+
+# Compute accuracy for each model
+acc_list <- lapply(models, accuracy)
+
+# Build summary table
+acc_table <- do.call(rbind, lapply(names(acc_list), function(nm) {
+  out <- acc_list[[nm]]
+  data.frame(
+    Model = nm,
+    RMSE  = out[1, "RMSE"]
+  )
+}))
+
+# Order by RMSE
+acc_table <- acc_table[order(acc_table$RMSE), ]
+acc_table
+```
+
+The RMSE comparison indicates that the multiplicative Holt-Winters model with damping provides the lowest forecasting error. However, the differences across specifications are minimal, suggesting that model performance is broadly comparable. The damped specification slightly improves predictive stability by preventing overly aggressive trend extrapolation, which aligns with the gradual upward movement observed in the series.
+
+## Residuals of the best mdoel
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# Best model selected in Q4
+best_fit <- fit_mul_damped
+
+# Residual diagnostics
+checkresiduals(best_fit)
+```
+
+The residual diagnostics indicate that the damped multiplicative Holt-Winters model adequately captures the underlying dynamics of the series. The residuals fluctuate around zero without visible patterns, and the autocorrelation function shows no significant remaining structure. The Ljung-Box test (p = 0.6044) fails to reject the null hypothesis of no serial correlation, supporting the adequacy of the model. Combined with its slightly lower RMSE, this justifies selecting this specification as the final model.
+
+## Model Summary
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# Model Summary
+summary(best_fit)
+```
+
+The smoothing parameters indicate a slowly evolving level (α = 0.1267) and an almost constant trend component (β ≈ 0), suggesting that the upward movement is gradual rather than volatile. The damping parameter (φ = 0.9729) ensures that long-term forecasts remain stable and do not extrapolate aggressively. Seasonal smoothing is minimal (γ ≈ 0), reflecting the strong stability of the monthly seasonal pattern observed in the data. Together with well-behaved residual diagnostics, these results confirm the adequacy of the selected specification.
+
+# EXTRA
+
+## Seasonal Naive
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# Seasonal naive
+naive_fit <- snaive(y_until_2023_ts, h = h)
+
+# Compare accuracy 
+acc_best  <- accuracy(best_fit)
+acc_naive <- accuracy(naive_fit)
+
+compare_table <- data.frame(
+  Model = c("Best", "Seasonal Naive"),
+  RMSE  = c(acc_best[1,"RMSE"], acc_naive[1,"RMSE"])
+)
+
+compare_table
+```
+
+## Box-Cox Transformation
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# Calculate Lambda
+lambda <- BoxCox.lambda(y_until_2023_ts)
+lambda
+```
+
+The estimated Box–Cox parameter (λ ≈ 0.75) is close to 1, suggesting that variance stabilization is not critically required. Therefore, no strong transformation such as a logarithm is necessary, and the series can be modeled in its original scale.
+
+## ACF and PACF
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# Graph the ACF and PACF
+par(mfrow=c(1,2))  
+acf(y_until_2023_ts, main="ACF of Training Series")
+pacf(y_until_2023_ts, main="PACF of Training Series")
+```
+
+The ACF displays a slow decay and significant autocorrelation across many lags, indicating non-stationarity in mean. Seasonal spikes at multiples of 12 confirm strong annual seasonality. The PACF shows a dominant spike at lag 1, suggesting a potential AR component. These patterns motivate the use of both regular and seasonal differencing before fitting a SARIMA model.
