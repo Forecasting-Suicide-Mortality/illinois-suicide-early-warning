@@ -1,0 +1,130 @@
+---
+title: "Poisson - TS Project"
+author: "Payton Stewart"
+date: "2026-02-25"
+output: html_document
+---
+
+## Setup
+
+Libraries
+```{r, message = FALSE, warning = FALSE}
+library(readxl)
+library(ggplot2)
+library(forecast)
+library(tseries)
+library(AER)
+library(MASS)
+```
+
+The Data
+```{r}
+path <- "/Users/paytonstewart/Desktop/Illinois Suicide Deaths 1999-2026.xlsx"
+df <- read_excel(path)
+```
+
+Clean
+```{r}
+df$date_clean <- gsub(" \\(provisional\\)", "", df$date)
+df$date_formatted <- as.Date(paste0(df$date_clean, "/01"), format="%Y/%m/%d")
+```
+
+Features
+```{r}
+df$t <- 1:nrow(df)
+df$month <- factor(format(df$date_formatted, "%m"))
+```
+
+Split: Train (1999-2023) vs Test (2024)
+```{r}
+train_df <- subset(df, date_formatted < as.Date("2024-01-01"))
+test_df  <- subset(df, date_formatted >= as.Date("2024-01-01") & date_formatted <= as.Date("2024-12-01"))
+```
+
+Timeseries for Train
+```{r}
+deaths_train_ts <- ts(train_df$deaths, start=c(1999, 1), frequency=12)
+```
+
+Initial Plots
+```{r}
+plot(deaths_train_ts, main="Monthly Suicide Deaths in Illinois (1999-2023)", col="blue", lwd=2)
+Acf(deaths_train_ts, main="ACF Plot Train")
+Pacf(deaths_train_ts, main="PACF Plot Train")
+```
+
+## Poisson
+
+Poisson Model
+```{r}
+poisson_fit <- glm(deaths ~ t + month, family = "poisson", data = train_df)
+```
+
+Predict 2024
+```{r}
+test_df$pred <- predict(poisson_fit, newdata = test_df, type = "response")
+```
+
+'Test' Accuracy (MAPE)
+```{r}
+mape_2024 <- mean(abs((test_df$deaths - test_df$pred) / test_df$deaths)) * 100
+cat("My Poisson Model MAPE for 2024 is:", round(mape_2024, 2), "%\n")
+```
+
+AIC and BIC
+```{r}
+cat("AIC:", AIC(poisson_fit), "\n")
+cat("BIC:", BIC(poisson_fit), "\n")
+```
+
+RMSE and MAE for the Test Set (2024)
+```{r}
+test_errors <- test_df$deaths - test_df$pred
+rmse_val <- sqrt(mean(test_errors^2))
+mae_val  <- mean(abs(test_errors))
+train_pred <- predict(poisson_fit, type = "response")
+train_rmse <- sqrt(mean((train_df$deaths - train_pred)^2))
+train_mae  <- mean(abs(train_df$deaths - train_pred))
+cat("Test RMSE:", rmse_val, "\n")
+cat("Test MAE:", mae_val, "\n")
+cat("Train RMSE:", train_rmse, "\n")
+cat("Train MAE:", train_mae, "\n")
+```
+
+Residual Plots
+```{r}
+plot(residuals(poisson_fit, type="pearson"), 
+     main="Poisson Residuals", ylab="Errors", xlab="Time Index")
+abline(h=0, col="red")
+```
+
+Ljung-Box Test
+```{r}
+Box.test(residuals(poisson_fit, type="pearson"), lag=12, type="Ljung-Box")
+```
+
+## Negative Binomial Model
+
+Fit the Negative Binomial Model
+```{r}
+nb_fit <- glm.nb(deaths ~ t + month, data = train_df)
+```
+
+Summary to compare with Poisson
+```{r}
+summary(nb_fit)
+``` 
+
+Predict for 2024
+```{r}
+test_df$pred_nb <- predict(nb_fit, newdata = test_df, type = "response")
+```
+
+Calculate new accuracy
+```{r}
+mape_nb <- mean(abs((test_df$deaths - test_df$pred_nb) / test_df$deaths)) * 100
+rmse_nb <- sqrt(mean((test_df$deaths - test_df$pred_nb)^2))
+
+cat("NB MAPE:", mape_nb, "%\n")
+cat("NB AIC:", AIC(nb_fit), "\n")
+```
