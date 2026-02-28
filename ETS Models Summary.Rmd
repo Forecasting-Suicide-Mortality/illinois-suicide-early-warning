@@ -168,6 +168,50 @@ summary(best_fit)
 
 The smoothing parameters indicate a slowly evolving level (α = 0.1267) and an almost constant trend component (β ≈ 0), suggesting that the upward movement is gradual rather than volatile. The damping parameter (φ = 0.9729) ensures that long-term forecasts remain stable and do not extrapolate aggressively. Seasonal smoothing is minimal (γ ≈ 0), reflecting the strong stability of the monthly seasonal pattern observed in the data. Together with well-behaved residual diagnostics, these results confirm the adequacy of the selected specification.
 
+# ARMAX
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# ARMAX 
+y <- y_until_2023_ts
+n <- length(y)
+
+# Data frame
+df_train <- data.frame(
+  y = as.numeric(y),
+  trend = 1:n,
+  season = factor(cycle(y)) 
+)
+
+# xreg
+xreg_train <- model.matrix(~ trend + season, data = df_train)[, -1]
+
+fit_reg_arma <- auto.arima(
+  y,
+  xreg = xreg_train,
+  seasonal = FALSE,      
+  stepwise = FALSE,
+  approximation = FALSE
+)
+
+summary(fit_reg_arma)
+checkresiduals(fit_reg_arma)
+
+df_future <- data.frame(
+  trend = (n + 1):(n + h),
+  season = factor(((cycle(y)[n] + 1):(cycle(y)[n] + h) - 1) %% frequency(y) + 1,
+                  levels = levels(df_train$season))
+)
+
+xreg_future <- model.matrix(~ trend + season, data = df_future)[, -1]
+
+fc_reg_arma <- forecast(fit_reg_arma, xreg = xreg_future, h = h)
+
+autoplot(fc_reg_arma) +
+  autolayer(actual_2024plus, series = "Actual (2024+)", linetype = "solid") +
+  ggtitle("Regression with ARMA errors: trend + month dummies") +
+  xlab("Year") + ylab("Deaths")
+```
+
 # EXTRA
 
 ## Seasonal Naive
@@ -208,3 +252,13 @@ pacf(y_until_2023_ts, main="PACF of Training Series")
 ```
 
 The ACF displays a slow decay and significant autocorrelation across many lags, indicating non-stationarity in mean. Seasonal spikes at multiples of 12 confirm strong annual seasonality. The PACF shows a dominant spike at lag 1, suggesting a potential AR component. These patterns motivate the use of both regular and seasonal differencing before fitting a SARIMA model.
+
+## STL decomposition
+
+```{r, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6}
+# STL decomposition (monthly => frequency=12)
+stl_fit <- stl(y_until_2023_ts, s.window = "periodic", robust = TRUE)
+plot(stl_fit, main = "STL Decomposition (y_until_2023_ts)")
+```
+
+
