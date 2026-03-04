@@ -1,0 +1,191 @@
+---
+title: "SARIMA Model — Illinois Suicide Deaths"
+output: html_notebook
+---
+
+## Setup
+```{r setup}
+packages <- c("tidyverse", "forecast", "zoo", "lubridate", "ggplot2", "readxl")
+
+installed <- packages %in% rownames(installed.packages())
+if (any(!installed)) install.packages(packages[!installed])
+lapply(packages, library, character.only = TRUE)
+```
+
+## Load & Prep Data
+```{r}
+df_raw <- read_excel("~/Downloads/Illinois Suicide Deaths 1999-2026.xlsx")
+
+df <- df_raw %>%
+  rename(date_raw = date, deaths = deaths) %>%
+  mutate(
+    deaths = as.numeric(deaths),
+    date   = as.Date(as.yearmon(date_raw, "%Y/%m"))
+  ) %>%
+  dplyr::select(date, deaths) %>%
+  arrange(date) %>%
+  filter(!is.na(deaths), !is.na(date))
+
+cat("Date range:", format(min(df$date)), "to", format(max(df$date)), "\n")
+cat("Total months:", nrow(df), "\n")
+```
+
+## Train / Test Split
+```{r}
+# Train: 1999/01 – 2023/12 (full years only)
+# Test:  2024/01 – 2024/12 (full year 2024) #UPDATE: doesnt include provisional data
+
+df_train <- df %>% filter(date <= as.Date("2023-12-01"))
+df_test  <- df %>% filter(date >= as.Date("2024-01-01") & date <= as.Date("2024-12-01"))
+
+cat("Training months:", nrow(df_train), "\n")
+cat("Test months:    ", nrow(df_test),  "\n")
+
+ts_train <- ts(df_train$deaths,
+               start     = c(1999, 1),
+               frequency = 12)
+
+ts_test  <- ts(df_test$deaths,
+               start     = c(2024, 1),
+               frequency = 12)
+```
+
+## Fit SARIMA Model
+```{r}
+# auto.arima searches over ARIMA(p,d,q)(P,D,Q)[12] to minimize AICc
+fit_sarima <- auto.arima(ts_train,
+                         seasonal      = TRUE,
+                         stepwise      = FALSE,
+                         approximation = FALSE, 
+                         trace         = TRUE)
+
+cat("\n=== SARIMA MODEL SUMMARY ===\n")
+print(summary(fit_sarima))
+```
+
+## AIC / BIC
+```{r}
+cat("=== MODEL SELECTION CRITERIA ===\n")
+cat("AIC:  ", round(AIC(fit_sarima), 2), "\n")
+cat("BIC:  ", round(BIC(fit_sarima), 2), "\n")
+cat("AICc: ", round(fit_sarima$aicc, 2), "\n")
+```
+
+## Forecast on Test Period
+```{r}
+h <- nrow(df_test)  # 12 months ahead
+
+fc <- forecast(fit_sarima, h = h, level = c(80, 95))
+
+# Build tidy forecast dataframe
+df_fc <- tibble(
+  date     = df_test$date,
+  actual   = df_test$deaths,
+  forecast = as.numeric(fc$mean),
+  lo_80    = as.numeric(fc$lower[, "80%"]),
+  hi_80    = as.numeric(fc$upper[, "80%"]),
+  lo_95    = as.numeric(fc$lower[, "95%"]),
+  hi_95    = as.numeric(fc$upper[, "95%"])
+)
+
+print(df_fc %>% mutate(across(where(is.numeric), round, 1)))
+```
+
+## Accuracy Metrics: RMSE & MAE
+```{r}
+cat("=== FORECAST ACCURACY (Test Set: 2024) ===\n") 
+
+mae  <- mean(abs(df_fc$actual - df_fc$forecast))
+rmse <- sqrt(mean((df_fc$actual - df_fc$forecast)^2))
+mape <- mean(abs((df_fc$actual - df_fc$forecast) / df_fc$actual)) * 100
+
+cat("MAE:  ", round(mae,  2), "deaths/month\n")
+cat("RMSE: ", round(rmse, 2), "deaths/month\n")
+cat("MAPE: ", round(mape, 2), "%\n")
+
+# Also print forecast package accuracy table
+accuracy(fc, ts_test)
+```
+
+## Ljung-Box Test (Residual Autocorrelation)
+```{r}
+cat("=== LJUNG-BOX TEST ===\n")
+lb <- Box.test(residuals(fit_sarima), lag = 12, type = "Ljung-Box")
+print(lb)
+
+if (lb$p.value > 0.05) {
+  cat("p =", round(lb$p.value, 4), "→ Residuals are white noise. Model is well-specified.\n")
+} else {
+  cat("p =", round(lb$p.value, 4), "→ Residuals show remaining autocorrelation. Consider refining model.\n")
+}
+```
+
+## Residual Plots
+```{r}
+# Full residual diagnostic panel (ACF, histogram, time plot)
+checkresiduals(fit_sarima)
+```
+```{r}
+# Manual residual plots for more control
+resid_df <- tibble(
+  date     = df_train$date,
+  residual = as.numeric(residuals(fit_sarima))
+)
+
+# Residuals over time
+ggplot(resid_df, aes(x = date, y = residual)) +
+  geom_line(color = "#2C7BB6", linewidth = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "SARIMA Residuals Over Time",
+       subtitle = "Should appear as random noise around zero",
+       x = NULL, y = "Residual") +
+  theme_minimal(base_size = 13)
+
+# Residual histogram
+ggplot(resid_df, aes(x = residual)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,
+                 fill = "#4575B4", alpha = 0.8, color = "white") +
+  stat_function(fun = dnorm,
+                args = list(mean = mean(resid_df$residual),
+                            sd   = sd(resid_df$residual)),
+                color = "#D7191C", linewidth = 1.1) +
+  labs(title = "Residual Distribution",
+       subtitle = "Red curve = normal distribution fit",
+       x = "Residual", y = "Density") +
+  theme_minimal(base_size = 13)
+```
+
+## Forecast vs Actual Plot
+```{r}
+# Historical + forecast + actual test values
+ggplot() +
+  # Training history (last 5 years for readability)
+  geom_line(data = df_train %>% filter(date >= as.Date("2020-01-01")),
+            aes(x = date, y = deaths),
+            color = "#2C7BB6", linewidth = 0.8) +
+  # 95% prediction interval
+  geom_ribbon(data = df_fc,
+              aes(x = date, ymin = lo_95, ymax = hi_95),
+              fill = "#FDAE61", alpha = 0.3) +
+  # 80% prediction interval
+  geom_ribbon(data = df_fc,
+              aes(x = date, ymin = lo_80, ymax = hi_80),
+              fill = "#F46D43", alpha = 0.4) +
+  # Forecast line
+  geom_line(data = df_fc,
+            aes(x = date, y = forecast),
+            color = "#D7191C", linewidth = 1.1, linetype = "dashed") +
+  # Actual test points
+  geom_point(data = df_fc,
+             aes(x = date, y = actual),
+             color = "black", size = 2.5) +
+  geom_line(data = df_fc,
+            aes(x = date, y = actual),
+            color = "black", linewidth = 0.9) +
+  labs(title = "SARIMA Forecast vs Actual (2024)",
+      subtitle = "Black = actual | Dashed red = forecast | Shading = 80% and 95% prediction intervals",
+      x = NULL, y = "Deaths per Month") +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  theme_minimal(base_size = 13)
+```
+
