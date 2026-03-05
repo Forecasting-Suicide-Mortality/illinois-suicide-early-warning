@@ -57,7 +57,8 @@ fit_sarima <- auto.arima(ts_train,
                          seasonal      = TRUE,
                          stepwise      = FALSE,
                          approximation = FALSE, 
-                         trace         = TRUE)
+                         trace         = TRUE,
+                         D=1)
 
 cat("\n=== SARIMA MODEL SUMMARY ===\n")
 print(summary(fit_sarima))
